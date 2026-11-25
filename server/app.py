@@ -36,7 +36,7 @@ from typing import Annotated
 from pydantic import BaseModel, Field, model_validator
 
 import hmac
-import bots, fertilizer, language, llm, prices, sensors, speech, ui_i18n, weather
+import alerts, bots, fertilizer, language, llm, prices, sensors, speech, ui_i18n, weather
 from grounding import grounded_part, grounded_sources
 from prompts import GENERAL_PROMPT, PROMPT
 from rag import Retriever
@@ -574,9 +574,11 @@ async def sensors_ingest(body: SensorReading, authorization: str | None = Header
     if not _sensor_token_ok(authorization, x_device_token):
         raise HTTPException(status_code=401, detail="Missing or wrong device token.")
     rec = sensors.save(body.model_dump())
-    log.info("sensor %s seq=%s: T=%s RH=%s soil_raw=%s valid=%s mq135_raw=%s faults=%s", rec["device_id"],
+    log.info("sensor %s seq=%s: T=%s RH=%s soil_raw=%s valid=%s water=%s%% faults=%s", rec["device_id"],
              rec["seq"], rec["temperature_c"], rec["humidity_percent"], rec["soil_moisture_raw"],
-             rec["soil_sensor_valid"], rec["mq135_raw"], ",".join(rec["faults"]) or "-")
+             rec["soil_sensor_valid"], rec["water_level_percent"], ",".join(rec["faults"]) or "-")
+    if not rec.get("is_test_data"):
+        alerts.check(rec)                  # phones the farmer when the water level goes above the limit
     return {"ok": True, "received_at": rec["received_at"]}
 
 
@@ -706,6 +708,7 @@ async def health():
 
 
 api.include_router(bots.router)
+api.include_router(alerts.router)
 app.include_router(api)
 
 
