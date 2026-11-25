@@ -18,6 +18,7 @@ Endpoints (all under /api/krishi):
     GET  /audio/{id}.{mp3|s16|u8}  the spoken answer
     POST /sensors                reading from the UNO Q sensor device (device token)
     GET  /sensors/latest         newest reading, validity, online/stale/offline
+    GET/POST /whatsapp/webhook   WhatsApp Cloud API bot (bots.py); Telegram polls instead
 """
 import asyncio, json, logging, os, re, uuid
 from collections import OrderedDict
@@ -35,7 +36,7 @@ from typing import Annotated
 from pydantic import BaseModel, Field, model_validator
 
 import hmac
-import fertilizer, language, llm, prices, sensors, speech, ui_i18n, weather
+import bots, fertilizer, language, llm, prices, sensors, speech, ui_i18n, weather
 from grounding import grounded_sources
 from prompts import GENERAL_PROMPT, PROMPT
 from rag import Retriever
@@ -78,10 +79,15 @@ async def lifespan(_: FastAPI):
     log.info("Speech-to-text provider: %s | sensor ingestion %s", speech.provider(),
              "on" if os.getenv("KRISHI_SENSOR_TOKEN", "").strip() else "OFF (set KRISHI_SENSOR_TOKEN)")
     warm = asyncio.create_task(asyncio.to_thread(speech.warmup))
+    tg = asyncio.create_task(bots.telegram_loop()) if bots.telegram_on() else None
+    log.info("Chat bots: Telegram %s | WhatsApp %s", "on" if tg else "off",
+             "on" if bots.whatsapp_on() else "off")
     try:
         yield
     finally:
         warm.cancel()
+        if tg:
+            tg.cancel()
 
 
 app = FastAPI(title="Smart Krishi", lifespan=lifespan)
@@ -445,6 +451,18 @@ async def voice(file: UploadFile = File(...), session: str = "voice"):
     return {**r, "transcript": text, "question_display": q.get("display", text)}
 
 
+async def ask_farmer(text: str, session: str, heard_lang: str | None = None) -> dict:
+    """A question in any enabled language -> the reply in that language (the bots' pipeline)."""
+    q = await language.understand(text, heard_lang)
+    return await localize(await answer_question(q["english"], session), q["language"], q["style"])
+
+
+bots.setup(ask=ask_farmer,
+           transcribe=lambda audio, name: asyncio.to_thread(speech.transcribe_file_detect, audio,
+                                                            META["stt_hint"], name),
+           speak=lambda text, lang: speech.synth_mp3(for_speech(text), language.voice(lang)))
+
+
 @api.get("/audio/{aid}.{ext}")
 async def audio(aid: str, ext: str):
     item = AUDIO.get(aid)
@@ -612,9 +630,11 @@ async def health():
             "chunks": len(RET.chunks), "embeddings": RET.E is not None, "backend": backend, "model": model,
             "stt": speech.provider(), "embed_model": RET.model or None,
             "languages": language.enabled(), "sensor_ingestion": bool(os.getenv("KRISHI_SENSOR_TOKEN", "").strip()),
-            "sensor_status": sensors.status(sensors.latest())}
+            "sensor_status": sensors.status(sensors.latest()),
+            "bots": {"telegram": bots.telegram_on(), "whatsapp": bots.whatsapp_on()}}
 
 
+api.include_router(bots.router)
 app.include_router(api)
 
 

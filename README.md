@@ -19,8 +19,6 @@ in the same language, using live soil readings from your own field.
 
 </div>
 
-![Chiguru landing page, hero section](docs/images/screenshots/01-hero.jpg)
-
 > **Chiguru** (ಚಿಗುರು) means *a new sprout* in Kannada. **Smart Krishi** (ಕೃಷಿ, *farming*) is the
 > voice kiosk inside it. This repository holds the whole project: the 3D landing page, the
 > ESP32 kiosk firmware, the PC bridge and the AI server.
@@ -30,7 +28,6 @@ in the same language, using live soil readings from your own field.
 - [Problem statement](#problem-statement)
 - [Our solution](#our-solution)
 - [The hardware](#the-hardware)
-- [Screenshots](#screenshots)
 - [Features](#features)
 - [Architecture](#architecture)
 - [Why the answers can be trusted](#why-the-answers-can-be-trusted)
@@ -76,33 +73,11 @@ looks dry, the fertilizer bag is open. The tools they have today fall short in f
 
 ## The hardware
 
-<table>
-  <tr>
-    <td width="50%"><img src="docs/images/hardware/sensor-node.jpg" alt="Sensor node: Arduino UNO Q with a DHT11 and a soil moisture probe in a tray of soil" /></td>
-    <td width="50%"><img src="docs/images/hardware/voice-kiosk.jpg" alt="Voice kiosk: ESP32 on breadboards with a TFT screen showing sensor readings in Kannada, and a speaker" /></td>
-  </tr>
-  <tr>
-    <td><b>Sensor node.</b> Arduino UNO Q with a DHT11 (air temperature and humidity) on the mini
-    breadboard and a soil-moisture probe (LM393 module) in a tray of soil.</td>
-    <td><b>Voice kiosk.</b> ESP32 DevKit, MAX98357A amplifier and speaker, INMP441 microphone and an
-    ILI9341 TFT. Here the screen shows the field readings in Kannada: ತಾಪಮಾನ (temperature) 28.2 °C,
-    ಆರ್ದ್ರತೆ (humidity) and ಮಣ್ಣಿನ ತೇವಾಂಶ (soil moisture), with "sensor online, updated 10 s ago".</td>
-  </tr>
-</table>
-
-## Screenshots
-
-The landing page is one continuous camera flight through a 3D farm. Each section of the page
-moves the camera to a new part of the farm.
-
-| | |
-|---|---|
-| ![Your land section](docs/images/screenshots/02-your-land.jpg) | ![Ask Chiguru section](docs/images/screenshots/03-ask-chiguru.jpg) |
-| **01 · Your Land.** Crop cards in Hindi, Kannada and Telugu over the wheat field. | **02 · Ask Chiguru.** Voice features beside the pasture and grazing cows. |
-| ![Device section](docs/images/screenshots/04-device.jpg) | ![Impact section](docs/images/screenshots/05-impact.jpg) |
-| **03 · The Device.** Sensor beacons and a holographic field scan over the crop rows, with labels in Tamil, Telugu and Bengali. | **04 · Impact.** Key numbers over the valley and the windmill. |
-| ![Contact section](docs/images/screenshots/06-contact.jpg) | <img src="docs/images/screenshots/07-mobile.jpg" alt="Mobile view of the hero" width="260" /> |
-| **05 · Contact.** The camera rises toward the mountains and the sun. | **Mobile.** The same scene adapts to a phone, with quality tuned to the device. |
+- **Sensor node.** Arduino UNO Q with a DHT11 (air temperature and humidity) on the mini
+  breadboard and a soil-moisture probe (LM393 module) in a tray of soil.
+- **Voice kiosk.** ESP32 DevKit, MAX98357A amplifier and speaker, INMP441 microphone and an
+  ILI9341 TFT that shows the field readings (temperature, humidity and soil moisture) in the
+  farmer's language, with the sensor status.
 
 ## Features
 

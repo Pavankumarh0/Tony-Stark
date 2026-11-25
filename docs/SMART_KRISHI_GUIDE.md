@@ -365,6 +365,31 @@ These are the nutrient roles in `kb/03_fertilizers_and_nutrients.md`, and a test
 - **Knowledge base (`kb/`)** is **starter content, not yet verified**. Its only fertilizer doses are the sourced ones in `09_recommended_fertilizer_doses.md`. Check it against the official package of practices (UAS Bangalore / KVK) before farmers rely on it.
 - **Back to Campus Mithra:** flash Campus Mithra's `firmware/` again.
 
+## Telegram and WhatsApp bots (`server/bots.py`)
+
+Farmers can ask the same assistant from their phone. They can type or send a voice note in Kannada, Hindi or English. The reply comes back in the same language. A voice note also gets a spoken reply, under a line showing what was heard. Each chat is its own session, so follow-up questions work. Answers go through the same pipeline as the kiosk: knowledge base, grounding check, live sensor readings, prices and weather.
+
+**Telegram** (no public URL needed: the server polls Telegram)
+1. In Telegram, open **@BotFather**, send `/newbot`, and copy the token.
+2. In `.env`, set `TELEGRAM_BOT_TOKEN=<token>` and restart the server. The log shows `Chat bots: Telegram on`.
+3. Open your bot and send `/start`.
+4. Optional: `TELEGRAM_ALLOWED_CHATS` limits who can use it. Each chat id appears in the server log.
+
+**WhatsApp** (Meta WhatsApp Cloud API: the free test number works for up to 5 registered phones)
+1. On developers.facebook.com, create an app of type *Business* and add **WhatsApp**. Under *API Setup*, copy the **access token** and the **Phone number ID**, and add your phone as a test recipient.
+2. Under *App settings → Basic*, copy the **App secret**.
+3. In `.env`, set `WHATSAPP_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_APP_SECRET`, and a `WHATSAPP_VERIFY_TOKEN` of your choice.
+4. Meta needs an HTTPS URL that reaches the PC. Run a tunnel, for example `cloudflared tunnel --url http://localhost:8001`, and copy the `https://….trycloudflare.com` address.
+5. Under *WhatsApp → Configuration → Webhook*, set the callback URL to `https://<tunnel>/api/krishi/whatsapp/webhook` and the verify token to your `WHATSAPP_VERIFY_TOKEN`. Then subscribe to the **messages** field.
+6. Send a message to the test number.
+
+Notes:
+- The test access token expires after 24 h. Use a *System User* permanent token for longer runs.
+- A quick tunnel gets a new address on every start, so update the webhook each time, or use a named tunnel.
+- Messages without a valid Meta signature are rejected.
+
+`GET /api/krishi/health` reports `"bots": {"telegram": …, "whatsapp": …}`.
+
 ## Tests
 
 ```powershell
