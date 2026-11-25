@@ -26,13 +26,14 @@ from arduino.app_utils import App, Bridge
 
 HERE = Path(__file__).resolve().parent
 FAULTS = {0: "dht_read_failed", 1: "dht_out_of_range", 2: "soil_saturated_high", 3: "soil_near_zero",
-          4: "soil_noisy", 5: "mq135_saturated_high", 6: "mq135_near_zero", 7: "mq135_warming_up",
-          8: "mq135_noisy"}
+          4: "soil_noisy", 8: "water_noisy"}          # bits 5-7 were the MQ-135's (removed)
+ADC_MAX = 16383                                       # 14-bit, as in the sketch
 
 
 def load_config() -> dict:
     cfg = {"backend_url": "", "device_token": "", "device_id": "unoq_soil_01", "crop": None,
-           "soil_dry_raw": None, "soil_wet_raw": None, "timeout_s": 4}
+           "soil_dry_raw": None, "soil_wet_raw": None, "water_empty_raw": 0, "water_full_raw": ADC_MAX,
+           "timeout_s": 4}
     for name in ("config.json", "config.example.json"):
         f = HERE / name
         if f.exists():
@@ -76,11 +77,22 @@ def soil_percent(raw: int, faults: list[str]):
     return round(min(100.0, max(0.0, pct)), 1)
 
 
-def krishi_reading(dht_ok, temp_c, hum, soil_raw, soil_valid, mq_raw, mq_valid, faults, seq, uptime_s):
+def water_percent(raw: int):
+    """Percent of the water level sensor's strip under water = (RAW - EMPTY) / (FULL - EMPTY)
+    x 100, clamped to 0-100. EMPTY is the reading with the sensor dry and FULL with it
+    fully under water (water_empty_raw / water_full_raw; by default 0 and the ADC maximum)."""
+    empty, full = float(CFG.get("water_empty_raw") or 0), float(CFG.get("water_full_raw") or ADC_MAX)
+    if full == empty:
+        return None
+    return round(min(100.0, max(0.0, (raw - empty) / (full - empty) * 100.0)), 1)
+
+
+def krishi_reading(dht_ok, temp_c, hum, soil_raw, soil_valid, water_raw, water_valid, faults, seq, uptime_s):
     """Bridge handler: build the payload and leave it for the loop."""
     global _pending
     names = [n for bit, n in FAULTS.items() if int(faults) & (1 << bit)]
     pct = soil_percent(int(soil_raw), names)
+    wpct = water_percent(int(water_raw)) if water_valid else None
     payload = {
         "device_id": CFG["device_id"],
         "temperature_c": round(float(temp_c), 1) if dht_ok else None,
@@ -88,8 +100,9 @@ def krishi_reading(dht_ok, temp_c, hum, soil_raw, soil_valid, mq_raw, mq_valid, 
         "soil_moisture_raw": int(soil_raw),
         "soil_moisture_percent": pct,
         "soil_sensor_valid": pct is not None,
-        "mq135_raw": int(mq_raw),
-        "mq135_valid": bool(mq_valid),
+        "water_level_raw": int(water_raw),
+        "water_level_percent": wpct,
+        "water_level_valid": wpct is not None,
         "faults": names,
         "seq": int(seq),
         "uptime_s": int(uptime_s),
@@ -97,7 +110,8 @@ def krishi_reading(dht_ok, temp_c, hum, soil_raw, soil_valid, mq_raw, mq_valid, 
     if CFG.get("crop"):
         payload["crop"] = str(CFG["crop"])[:40]
     print(f"[krishi] #{seq} T={payload['temperature_c']} RH={payload['humidity_percent']} "
-          f"soil_raw={soil_raw} soil_pct={pct if pct is not None else '-'} soil_valid={payload['soil_sensor_valid']} mq135_raw={mq_raw} "
+          f"soil_raw={soil_raw} soil_pct={pct if pct is not None else '-'} soil_valid={payload['soil_sensor_valid']} "
+          f"water_raw={water_raw} water_pct={wpct if wpct is not None else '-'} "
           f"faults={','.join(names) or '-'}")
     with _lock:
         _pending = payload

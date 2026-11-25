@@ -433,6 +433,40 @@ def resample(audio, rate):
     return np.clip(out, -32768, 32767).astype(np.int16), TARGET_RATE
 
 
+class PcMicRecorder:
+    """Records the PC microphone between start() and stop() on its own thread,
+    for --button-pc-mic: the kiosk button decides when, the PC mic listens."""
+
+    def __init__(self, pa, device):
+        self.pa, self.device = pa, device
+        self.frames, self.thread, self.running = [], None, False
+
+    def start(self):
+        self.stop()
+        self.frames, self.running = [], True
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread.start()
+
+    def _run(self):
+        stream, self.rate = open_input_stream(self.pa, self.device["index"], self.device["rate"])
+        try:
+            while self.running:
+                self.frames.append(stream.read(CHUNK, exception_on_overflow=False))
+        finally:
+            stream.stop_stream()
+            stream.close()
+
+    def stop(self):
+        """The recording as 16 kHz mono int16, or None if nothing was recording."""
+        if not self.thread:
+            return None
+        self.running = False
+        self.thread.join(timeout=2)
+        self.thread = None
+        audio = np.frombuffer(b"".join(self.frames), dtype=np.int16)
+        return resample(audio, getattr(self, "rate", TARGET_RATE))[0]
+
+
 def wav_bytes(audio, rate):
     buf = io.BytesIO()
     with wave.open(buf, "wb") as w:
@@ -1032,6 +1066,7 @@ class DashboardPoller:
         t h  temperature degC, humidity %
         sr sv sp   soil raw ADC, soil valid 0/1, soil percent (calibrated only)
         mq mv      MQ-135 raw ADC, valid 0/1 (0 while warming up / faulty)
+        wl wv      water level % of the sensor strip under water, valid 0/1
         srv  ok | down       dev  device id       td  1 = test data
     """
 
@@ -1096,6 +1131,8 @@ class DashboardPoller:
                          sv="1" if rd.get("soil_sensor_valid") else "0",
                          sp=self._num(rd.get("soil_moisture_percent"), 0), mq=self._num(rd.get("mq135_raw")),
                          mv="1" if rd.get("mq135_valid", True) else "0",
+                         wl=self._num(rd.get("water_level_percent"), 0),
+                         wv="1" if rd.get("water_level_valid") else "0",
                          dev=re.sub(r"[^A-Za-z0-9_\-]", "", str(rd.get("device_id", "")))[:24],
                          td="1" if rd.get("is_test_data") else "0")
         return "D:" + ";".join(f"{k}={v}" for k, v in f.items())
@@ -1161,7 +1198,7 @@ def kiosk_fertilizer(server, esp, line):
           f"urea {t['urea_kg']} kg, DAP {t['dap_kg']} kg, MOP {t['mop_kg']} kg  ({rec['source']['crop']})")
 
 
-def run_button_mode(server, esp, args):
+def run_button_mode(server, esp, args, pc_mic=None):
     """Wait for the kiosk's talk button and answer each recording.
 
     The ESP32 streams its INMP441 audio while the button is held ("REC:START",
@@ -1219,12 +1256,19 @@ def run_button_mode(server, esp, args):
 
             if line == "REC:START":
                 rec, rec_last = bytearray(), time.time()
-                print("\n>>> LISTENING (button held)")
+                if pc_mic:
+                    pc_mic.start()
+                print("\n>>> LISTENING (button held)" + (" - speak to the PC mic" if pc_mic else ""))
             elif line.startswith("REC:END"):
                 parts = line.split()
                 kiosk_bytes = int(parts[1]) if len(parts) > 1 else 0
                 kiosk_ms = int(parts[2]) if len(parts) > 2 else 0
                 print(">>> released")
+                if pc_mic:
+                    # the PC mic's recording replaces the kiosk mic's
+                    audio = pc_mic.stop()
+                    rec = bytearray(audio.astype("<i2").tobytes()) if audio is not None else bytearray()
+                    kiosk_bytes = len(rec)
                 try:
                     answer_kiosk_recording(server, esp, rec or bytearray(), kiosk_bytes, kiosk_ms, args)
                 except Exception as exc:
@@ -1237,6 +1281,8 @@ def run_button_mode(server, esp, args):
                     last_hb = time.time()
             elif line.startswith("REC:CANCEL"):
                 reason = line[11:].strip()
+                if pc_mic:
+                    pc_mic.stop()
                 if reason == "tap":
                     print("  (button tap: screen switched)")
                 else:
@@ -1305,6 +1351,9 @@ def main(argv=None):
     ap.add_argument("--pc-mic", action="store_true",
                     help="use the PC (earphone) microphone and the hotkey instead of the "
                          "kiosk's INMP441 and talk button")
+    ap.add_argument("--button-pc-mic", action="store_true",
+                    help="kiosk talk button, but record from the PC microphone (while the kiosk's "
+                         "INMP441 is faulty or missing)")
     ap.add_argument("--session", default="pc")
     args = ap.parse_args(argv)
 
@@ -1327,13 +1376,21 @@ def main(argv=None):
     if not args.pc_mic and not args.devices:
         if check_server(args.server) is None:
             return 1
+        pa = pc_mic = None
+        if args.button_pc_mic:
+            import pyaudio
+            pa = pyaudio.PyAudio()
+            devices = list_input_devices(pa)
+            pc_mic = PcMicRecorder(pa, pick_input_device(pa, devices, default_input_index(pa)))
         esp = connect_esp32(args.esp32, kiosk_volume(args.volume))
         if esp:
             try:
-                run_button_mode(args.server, esp, args)
+                run_button_mode(args.server, esp, args, pc_mic)
             finally:
                 esp.clear()
                 esp.close()
+                if pa:
+                    pa.terminate()
             return 0
         print("  No kiosk connected - falling back to the PC microphone and hotkey.")
 

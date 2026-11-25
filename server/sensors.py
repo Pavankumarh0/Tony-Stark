@@ -23,6 +23,7 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
+import agro
 from campus_time import IST
 
 _lock = threading.Lock()
@@ -120,6 +121,7 @@ def validity(rec: dict) -> dict:
         "soil_moisture": bool(rec.get("soil_sensor_valid")) and rec.get("soil_moisture_percent") is not None,
         "soil_raw": rec.get("soil_moisture_raw") is not None,
         "mq135": rec.get("mq135_raw") is not None and rec.get("mq135_valid", True),
+        "water_level": bool(rec.get("water_level_valid")) and rec.get("water_level_percent") is not None,
     }
 
 
@@ -169,6 +171,10 @@ def as_context(rec: dict, now: datetime | None = None) -> str:
     else:
         lines.append("Soil moisture: the soil moisture sensor is not calibrated yet, so the soil water level "
                      "cannot be assessed reliably from it.")
+    if rec.get("water_level_valid") and rec.get("water_level_percent") is not None:
+        wl = rec["water_level_percent"]
+        lines.append(f"Water level sensor: {_num(wl)} percent of the sensor strip is under water, "
+                     f"which is {agro.water_band(wl)}.")
     if rec.get("mq135_raw") is not None:
         lines.append("Air quality sensor MQ-135: only an uncalibrated raw value is available, which is not a gas "
                      "level, ppm or air quality index, so air quality cannot be judged from it.")
@@ -178,6 +184,70 @@ def as_context(rec: dict, now: datetime | None = None) -> str:
     return "\n".join(lines)
 
 
+# "What is the temperature?" asks for a value, not advice: answered straight from
+# the reading, with no model in between (instant, and nothing to get wrong).
+READING_ASK = re.compile(r"\b(temperature|temp|hot|cold|humidity|humid|moisture|readings?|sensors?|water level|"
+                         r"tank|water sensor|"
+                         r"farm conditions?|field conditions?|how is my (?:farm|field|soil))\b", re.I)
+ADVICE_ASK = re.compile(r"\b(should|need|how much|how many|when|why|what (?:to|should) do|irrigat\w*|"
+                        r"fertili[sz]\w*|spray|sow|plant(?:ing)?|harvest|disease|pest|price|rate|weather|"
+                        r"forecast|rain\w*)\b", re.I)
+
+
+def wants_reading(question: str) -> bool:
+    return bool(READING_ASK.search(question)) and not ADVICE_ASK.search(question)
+
+
+def reading_answer(rec: dict, question: str = "", now: datetime | None = None) -> str:
+    """The latest reading as a short spoken answer: only the values asked for
+    (all of them for a general question), with when it was taken."""
+    now = now or datetime.now(timezone.utc)
+    at = datetime.fromisoformat(rec["received_at"]).astimezone(IST)
+    st, age = status(rec, now), age_seconds(rec, now)
+    q = question.lower()
+    want_t = bool(re.search(r"temp|hot|cold", q))
+    want_h = "humid" in q
+    want_s = bool(re.search(r"moisture|soil", q))
+    want_w = bool(re.search(r"water level|tank|water sensor", q))
+    if not (want_t or want_h or want_s or want_w):
+        want_t = want_h = want_s = want_w = True
+    t, h = rec.get("temperature_c"), rec.get("humidity_percent")
+    parts = []
+    if want_t:
+        parts.append(f"the air temperature is {_num(t)} degrees Celsius" if t is not None
+                     else "the temperature sensor gave no valid reading")
+    if want_h:
+        parts.append(f"the air humidity is {_num(h)} percent" if h is not None
+                     else "the humidity sensor gave no valid reading")
+    if want_s:
+        parts.append(f"the soil moisture is {_num(rec['soil_moisture_percent'])} percent"
+                     if rec.get("soil_sensor_valid") and rec.get("soil_moisture_percent") is not None
+                     else "the soil moisture sensor is not calibrated yet, so I cannot tell the soil water level")
+    wl = rec.get("water_level_percent") if rec.get("water_level_valid") else None
+    if want_w and (wl is not None or parts == []):
+        parts.append(f"the water level sensor shows {_num(wl)} percent, which is {agro.water_band(wl)}" if wl is not None
+                     else "the water level sensor gave no valid reading")
+    said = parts[0] if len(parts) == 1 else ", ".join(parts[:-1]) + " and " + parts[-1]
+    if st == "online":
+        lead = "Right now on your farm, " if age < 120 else f"On your farm, at {at:%I:%M %p}, "
+    else:
+        lead = f"The sensor is {st}, so this is the last reading, from {at:%I:%M %p} on {at:%d %B}: "
+    text = lead + said + "."
+    # what the reading means for the crop asked about, or the farm's own crop
+    crop = agro.find_crop(question) or agro.find_crop(rec.get("crop") or "")
+    if want_t and t is not None:
+        text += " " + agro.temperature_advice(t, crop)
+    if want_s and rec.get("soil_sensor_valid") and rec.get("soil_moisture_percent") is not None:
+        text += " " + agro.moisture_advice(rec["soil_moisture_percent"], crop)
+    if want_w and wl is not None:
+        text += " " + agro.water_advice(wl)
+    if st != "online":
+        text += " Check the field yourself, because conditions may have changed since this reading."
+    if rec.get("is_test_data"):
+        text += " Note: this is test data, not a real farm measurement."
+    return text[0].upper() + text[1:]
+
+
 # How the device's fault codes are said to a farmer.
 FAULT_TEXT = {
     "dht_read_failed": "the temperature and humidity sensor did not answer",
@@ -185,6 +255,7 @@ FAULT_TEXT = {
     "soil_saturated_high": "the soil probe reading is stuck at the top of its range, so the probe and its wiring should be checked",
     "soil_near_zero": "the soil probe reading is near zero, so the probe may be disconnected or shorted",
     "soil_noisy": "the soil probe readings are jumping around too much to trust",
+    "water_noisy": "the water level sensor readings are jumping around too much to trust",
     "mq135_saturated_high": "the air quality sensor reading is stuck at the top of its range",
     "mq135_near_zero": "the air quality sensor reading is near zero, so it may be disconnected",
     "mq135_warming_up": "the air quality sensor is still warming up",

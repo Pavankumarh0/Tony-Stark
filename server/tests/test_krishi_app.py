@@ -162,7 +162,7 @@ class KrishiApiTests(unittest.TestCase):
                  "sensor is not calibrated yet, so the soil water level cannot be assessed reliably."
                  "\nSOURCES: live_sensors")
         with gemma(reply) as g:
-            r = self.ask("How is my farm today?")
+            r = self.ask("Should I water my farm today?")         # advice: Gemma, with the reading in its own section
         prompt = g.call_args.args[0]
         live = prompt.split("LIVE SENSOR READINGS:\n", 1)[1].split("KNOWLEDGE DOCUMENTS:\n")[0]
         docs = prompt.split("KNOWLEDGE DOCUMENTS:\n", 1)[1]
@@ -177,8 +177,53 @@ class KrishiApiTests(unittest.TestCase):
     def test_invented_sensor_value_is_rejected(self):
         self.post()
         with gemma("The soil moisture is 42 percent, so your soil is fine.\nSOURCES: live_sensors"):
-            r = self.ask("What is the soil moisture now?")
-        self.assertEqual(r["via"], "ungrounded")
+            r = self.ask("Should I water now, is the soil moisture ok?")
+        # the made-up 42 never reaches the farmer: the real reading is said instead
+        self.assertEqual(r["via"], "sensor")
+        self.assertNotIn("42", r["answer"])
+        self.assertIn("not calibrated", r["answer"])
+
+    def test_reading_question_is_answered_from_the_sensor_directly(self):
+        self.post()
+        with gemma("should not be called") as g:
+            t = self.ask("What is the live temperature?")
+            h = self.ask("tell me the humidity")
+            farm = self.ask("How is my farm today?")
+        g.assert_not_called()
+        self.assertEqual(t["via"], "sensor")
+        self.assertIn("28.5 degrees Celsius", t["answer"])
+        self.assertNotIn("humidity", t["answer"])               # only what was asked
+        self.assertIn("31 percent", h["answer"])
+        self.assertIn("28.5", farm["answer"])
+        self.assertIn("not calibrated", farm["answer"])
+        self.assertIn("live_sensors", t["sources"])
+
+    def test_reading_is_interpreted_for_the_crop(self):
+        self.post({**self.PAYLOAD, "soil_moisture_percent": 12, "soil_sensor_valid": True})
+        with gemma("should not be called"):
+            t = self.ask("Is this temperature good for ragi?")
+            s = self.ask("What is the soil moisture?")
+        self.assertIn("good temperature for ragi", t["answer"])          # 28.5 is inside ragi's 26 to 29
+        self.assertIn("Crops that grow best", t["answer"])
+        self.assertIn("12 percent", s["answer"])
+        self.assertIn("The soil is dry", s["answer"])
+        self.assertIn("Irrigate", s["answer"])
+
+    def test_water_level_is_stored_and_answered(self):
+        r = self.post({**self.PAYLOAD, "water_level_raw": 2949, "water_level_percent": 18.0, "water_level_valid": True})
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(self.c.get("/api/krishi/sensors/latest").json()["valid"]["water_level"])
+        with gemma("should not be called"):
+            w = self.ask("What is the water level?")
+        self.assertEqual(w["via"], "sensor")
+        self.assertIn("18 percent", w["answer"])
+        self.assertIn("low water level", w["answer"])
+        self.assertNotIn("temperature", w["answer"])            # only what was asked
+
+    def test_crop_climate_kb_matches_the_code(self):
+        import agro
+        kb = (krishi.KB_DIR / "15_crop_climate_and_sensor_advice.md").read_text(encoding="utf-8")
+        self.assertEqual(kb, agro.kb_markdown())                         # regenerate with: python agro.py --kb
 
     def test_farm_question_without_any_reading_says_so(self):
         with gemma("should not be called") as g:

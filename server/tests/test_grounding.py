@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from grounding import context_signature, grounded_sources, has_conflicting_hours, verify_context_signature
+from grounding import context_signature, grounded_part, grounded_sources, has_conflicting_hours, verify_context_signature
 
 
 class GroundingChecksTests(unittest.TestCase):
@@ -14,6 +14,13 @@ class GroundingChecksTests(unittest.TestCase):
     def test_unsupported_number_rejects_answer(self):
         hits = [{"source": "locations.md", "title": "Library", "text": "Opening hours are not published."}]
         self.assertIsNone(grounded_sources("The library closes at 8 pm.", hits))
+
+    def test_grounded_part_keeps_only_supported_sentences(self):
+        hits = [{"source": "msp.md", "title": "MSP for kharif cereals", "text": "The MSP of ragi is 5205 rupees per quintal."}]
+        answer = "The MSP of ragi is 5205 rupees per quintal. It is higher than paddy by 900 rupees."
+        self.assertIsNone(grounded_sources(answer, hits))
+        self.assertEqual(grounded_part(answer, hits), ("The MSP of ragi is 5205 rupees per quintal.", ["msp.md"]))
+        self.assertIsNone(grounded_part("Ragi costs 900 rupees.", hits))      # nothing supported: no answer
 
     def test_combined_sources_support_a_combined_answer(self):
         hits = [

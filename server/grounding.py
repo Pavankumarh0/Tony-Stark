@@ -43,6 +43,19 @@ def has_conflicting_hours(hits: list[dict]) -> bool:
     return False
 
 
+def grounded_part(answer: str, hits: list[dict]) -> tuple[str, list[str]] | None:
+    """The sentences of an answer that pass grounded_sources on their own, when the
+    whole answer does not: a small model often adds one unsupported sentence to a
+    correct answer. Every sentence kept passes the same check, numbers included."""
+    kept, used = [], []
+    for sentence in (s.strip() for s in re.split(r"(?<=[.!?])\s+", answer) if s.strip()):
+        src = grounded_sources(sentence, hits)
+        if src:
+            kept.append(sentence)
+            used += [s for s in src if s not in used]
+    return (" ".join(kept), used) if kept else None
+
+
 def grounded_sources(answer: str, hits: list[dict]) -> list[str] | None:
     """Require evidence for each answer sentence and exact support for numeric claims."""
     sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", answer) if s.strip()]

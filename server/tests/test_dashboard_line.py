@@ -37,6 +37,14 @@ class DashboardLineTests(unittest.TestCase):
         self.assertEqual(f["mq"], "1748")
         self.assertEqual(f["srv"], "ok")
         self.assertEqual(f["dev"], "unoq_soil_01")
+        self.assertEqual(f["wl"], "")              # no water level sensor in this reading
+        self.assertEqual(f["wv"], "0")
+
+    def test_water_level(self):
+        rd = {**LATEST["reading"], "water_level_raw": 2949, "water_level_percent": 18.0, "water_level_valid": True}
+        f = fields(poller_with({**LATEST, "reading": rd}).take_line())
+        self.assertEqual(f["wl"], "18")
+        self.assertEqual(f["wv"], "1")
 
     def test_line_is_sent_once_per_poll(self):
         p = poller_with(LATEST)

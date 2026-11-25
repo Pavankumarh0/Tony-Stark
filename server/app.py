@@ -21,7 +21,7 @@ Endpoints (all under /api/krishi):
     GET/POST /whatsapp/webhook   WhatsApp Cloud API bot (bots.py); Telegram polls instead
 """
 import asyncio, json, logging, os, re, uuid
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal
@@ -37,7 +37,7 @@ from pydantic import BaseModel, Field, model_validator
 
 import hmac
 import bots, fertilizer, language, llm, prices, sensors, speech, ui_i18n, weather
-from grounding import grounded_sources
+from grounding import grounded_part, grounded_sources
 from prompts import GENERAL_PROMPT, PROMPT
 from rag import Retriever
 
@@ -61,11 +61,17 @@ SENSOR_SOURCE = "live_sensors"     # how the sensor section is named in the prom
 FERT_WORDS = re.compile(r"\b(fertili[sz]\w*|urea|dap|mop|potash|npk|nitrogen|phosphorus|manure)\b", re.I)
 WEATHER_WORDS = re.compile(r"\b(weather|rain\w*|forecast|storm|cloud\w*)\b", re.I)
 GREET = re.compile(r"^\W*(hi|hello|hey|namaste|namaskara|namaskar|good (morning|afternoon|evening))\b[\s\W]*(krishi|there)?\W*$", re.I)
+SMALL_TALK = re.compile(r"^\W*(how are (you|u)|how r u|how is it going|what'?s up|who are you|what is your name|"
+                        r"what'?s your name|nice to meet you|good night|i am (fine|good|ok)|fine|ok(ay)?|good)\b.{0,30}$", re.I)
+DOC_TALK = re.compile(r"\b(?:the |these )?(?:knowledge )?(?:documents?|context)(?: also)? (?:states?|says?|mentions?|"
+                      r"indicates?|shows?)(?: that)?,?\s*", re.I)
 THANKS = re.compile(r"^\W*(thanks|thank you|thank you very much|ok thanks|dhanyavada|bye|goodbye)\W*$", re.I)
 
 RET: Retriever | None = None
 AUDIO: "OrderedDict[str, dict]" = OrderedDict()
 LAST_Q: dict = {}
+HISTORY: dict = {}             # session -> the last few (question, answer) exchanges, in English
+HISTORY_TURNS = 6
 LAST_CONTEXT: dict = {}        # session -> what the last answer was given (evaluation only)
 
 
@@ -210,7 +216,13 @@ async def general_answer(q: str, rq: str, sid: str, sensor=None) -> dict | None:
     None = no usable answer, so the caller gives its usual reply."""
     if not general_on():
         return None
-    prev = f"PREVIOUS QUESTION (for context only): {LAST_Q[sid]}\n" if rq != q and sid in LAST_Q else ""
+    turns = HISTORY.get(sid)
+    if turns:
+        # the chat so far, so the reply continues the conversation like a person would
+        prev = "CONVERSATION SO FAR (oldest first, for context only):\n" + "".join(
+            f"Farmer: {a}\nSmart Krishi: {b}\n" for a, b in turns) + "\n"
+    else:
+        prev = f"PREVIOUS QUESTION (for context only): {LAST_Q[sid]}\n" if rq != q and sid in LAST_Q else ""
     try:
         raw = await llm.generate_general(GENERAL_PROMPT.format(previous=prev, question=q))
     except Exception as e:
@@ -253,14 +265,35 @@ async def web_price(q: str, p: dict) -> dict | None:
     return pack(q, answer, True, ["web_search"], via="price-web")
 
 
+def sensor_fallback(q: str, sid: str, sensor: dict) -> dict:
+    """A farm-condition question the model could not answer: the reading itself."""
+    log.info("answered from the sensor reading directly")
+    LAST_Q[sid] = q
+    return pack(q, sensors.reading_answer(sensors.latest(), q), True, [SENSOR_SOURCE], via="sensor", sensor=sensor)
+
+
 async def answer_question(q: str, sid: str = "web") -> dict:
+    """The English reply to one question, remembered as part of this session's chat."""
+    r = await _answer_question(q, sid)
+    if r.get("question") and r.get("answer"):
+        HISTORY.setdefault(sid, deque(maxlen=HISTORY_TURNS)).append((r["question"], r["answer"]))
+        while len(HISTORY) > 500:                        # forget the oldest chats
+            HISTORY.pop(next(iter(HISTORY)))
+    return r
+
+
+async def _answer_question(q: str, sid: str = "web") -> dict:
     q = (q or "").strip()
     if not q:
         return pack(q, UNHEARD, False)
-    if GREET.match(q):
+    if GREET.match(q) or THANKS.match(q) or SMALL_TALK.match(q):
+        # small talk gets a natural reply in the flow of the chat; the fixed lines when the model is off
+        g = await general_answer(q, q, sid)
+        if g and g["via"] == "general":
+            return g
+        if THANKS.match(q):
+            return pack(q, "You're welcome! Ask me anything else about your crops.", True)
         return pack(q, META["greeting"], True)
-    if THANKS.match(q):
-        return pack(q, "You're welcome! Ask me anything else about your crops.", True)
 
     prev = LAST_Q.get(sid)
     rq = f"{prev} {q}" if prev and len(q.split()) <= 5 else q          # short follow-ups reuse the last topic
@@ -295,6 +328,9 @@ async def answer_question(q: str, sid: str = "web") -> dict:
         if rec:
             sensor = {"device_id": rec["device_id"], "status": sensors.status(rec),
                       "received_at": rec["received_at"], "is_test_data": bool(rec.get("is_test_data"))}
+            if sensors.wants_reading(q) and not WEATHER_WORDS.search(q):
+                LAST_Q[sid] = q
+                return pack(q, sensors.reading_answer(rec, q), True, [SENSOR_SOURCE], via="sensor", sensor=sensor)
             text = sensors.as_context(rec) + ("\n" + sensor_hit["text"] if sensor_hit else "")
             sensor_hit = {"source": SENSOR_SOURCE, "title": "Live farm sensor readings", "text": text}
             relevant = True
@@ -316,22 +352,34 @@ async def answer_question(q: str, sid: str = "web") -> dict:
             g = await general_answer(q, rq, sid, sensor)
             if g:
                 return g
+        if sensor:
+            return sensor_fallback(q, sid, sensor)
         found = extractive_answer(q, hits)
         if found:
             log.info("answered from the knowledge base directly (Gemma unavailable)")
             return pack(q, found[0], True, [found[1]], via="kb-direct", sensor=sensor)
         return pack(q, BROKEN, False, via="error", sensor=sensor)
     if "NOT_IN_KB" in raw.upper():
+        if sensor:          # the model missed the reading it was given: say the reading itself
+            return sensor_fallback(q, sid, sensor)
         return await general_answer(q, rq, sid, sensor) or pack(q, DONT_KNOW, False, via="unknown", sensor=sensor)
 
     answer, cited = llm.split_sources(raw)
+    answer = DOC_TALK.sub("", answer).strip()        # "The documents state that ..." is not how a person talks
+    answer = answer[:1].upper() + answer[1:]
     if sensor_hit and SENSOR_SOURCE in raw.rsplit("\n", 1)[-1]:
         cited.insert(0, SENSOR_SOURCE)
-    sources = grounded_sources(answer, hits + ([sensor_hit] if sensor_hit else []))
+    evidence = hits + ([sensor_hit] if sensor_hit else [])
+    sources = grounded_sources(answer, evidence)
+    if sources is None and (part := grounded_part(answer, evidence)):
+        log.info("kept only the grounded sentences of: %r", answer[:200])
+        answer, sources = part
     if sources is None:
         # Catches invented quantities and readings: any number that is not in
         # the documents or the sensor section fails.
         log.info("rejected ungrounded answer: %r", answer[:200])
+        if sensor:
+            return sensor_fallback(q, sid, sensor)
         return await general_answer(q, rq, sid, sensor) or pack(q, DONT_KNOW, False, via="ungrounded", sensor=sensor)
     sources = [s for s in cited if s in sources] or sources
     LAST_Q[sid] = q
@@ -387,6 +435,9 @@ class SensorReading(BaseModel):
     soil_sensor_valid: bool = False
     mq135_raw: int | None = Field(default=None, ge=0, le=65535)
     mq135_valid: bool = True
+    water_level_raw: int | None = Field(default=None, ge=0, le=65535)
+    water_level_percent: float | None = Field(default=None, ge=0, le=100)
+    water_level_valid: bool = False
     faults: list[Annotated[str, Field(max_length=40)]] = Field(default_factory=list, max_length=12)
     crop: str | None = Field(default=None, max_length=40)
     seq: int | None = Field(default=None, ge=0)
@@ -405,6 +456,7 @@ class SensorReading(BaseModel):
 async def chat(body: Chat):
     LAST_CONTEXT.pop(body.session, None)
     r = await localize(await answer_question(body.question, body.session), body.language, body.style)
+    prefetch_audio(r.get("audio_id"))
     if body.include_context:
         r["contexts"] = LAST_CONTEXT.pop(body.session, [])
     return r
@@ -448,6 +500,7 @@ async def voice(file: UploadFile = File(...), session: str = "voice"):
         return {**pack("", UNHEARD, False), "transcript": ""}
     q = await language.understand(text, heard_lang)
     r = await localize(await answer_question(q["english"], session), q["language"], q["style"])
+    prefetch_audio(r.get("audio_id"))
     return {**r, "transcript": text, "question_display": q.get("display", text)}
 
 
@@ -463,11 +516,29 @@ bots.setup(ask=ask_farmer,
            speak=lambda text, lang: speech.synth_mp3(for_speech(text), language.voice(lang)))
 
 
+async def _render_kiosk_audio(item: dict):
+    item["mp3"] = await speech.synth_mp3(for_speech(item["text"]), item.get("voice", VOICE))
+    item["s16"] = kiosk_loud(await asyncio.to_thread(speech.mp3_to_pcm16, item["mp3"], I2S_RATE))
+
+
+def prefetch_audio(aid: str | None):
+    """Start speaking the answer now: the kiosk draws the answer on its screen
+    before it asks for the audio, so TTS runs while it draws."""
+    item = AUDIO.get(aid) if aid and TTS_ON else None
+    if item and "job" not in item:
+        item["job"] = asyncio.create_task(_render_kiosk_audio(item))
+
+
 @api.get("/audio/{aid}.{ext}")
 async def audio(aid: str, ext: str):
     item = AUDIO.get(aid)
     if not item or ext not in ("mp3", "u8", "s16"):
         return Response(status_code=404)
+    if "job" in item:
+        try:
+            await item["job"]          # a finished task returns at once; a failed one re-raises
+        except Exception as e:
+            log.warning("TTS prefetch failed (%s); trying again", e)
     try:
         if "mp3" not in item:
             item["mp3"] = await speech.synth_mp3(for_speech(item["text"]), item.get("voice", VOICE))

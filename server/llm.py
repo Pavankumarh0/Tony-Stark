@@ -176,6 +176,8 @@ async def generate(prompt: str) -> str:
         r = await c.post(
             os.getenv("OLLAMA_URL", "http://localhost:11434").rstrip("/") + "/api/generate",
             json={"model": os.getenv("GEMMA_MODEL", "gemma3:4b"), "prompt": prompt, "stream": False,
+                  # stay loaded between questions: a cold load adds several seconds
+                  "keep_alive": os.getenv("OLLAMA_KEEP_ALIVE", "24h"),
                   "options": {"temperature": 0.1, "num_predict": 240}})
         r.raise_for_status()
         return r.json()["response"].strip()

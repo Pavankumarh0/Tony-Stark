@@ -9,16 +9,16 @@
  *
  *   DHT11 DATA        -> D2   (temperature degC, relative humidity %)
  *   HW-080 soil AO    -> A0   (3.3 V supply)
- *   MQ-135 AO         -> A1   through a voltage divider: 5 V sensor output
- *                             must never exceed 3.3 V at A1 (see README)
+ *   water level S     -> A1   sensor powered from 3.3 V (not 5 V), so its
+ *                             output can never exceed 3.3 V at A1
  *   all grounds common
  *
  * Every 5 s:  Bridge.notify("krishi_reading", ...)  -> python/main.py
  * Debug:      Monitor (App Lab console / Arduino IDE serial monitor)
  *
  * Nothing is converted into units the hardware cannot measure: soil and
- * MQ-135 are sent as raw ADC counts. The soil percentage is only computed on
- * the Linux side, and only once calibration values are configured.
+ * the water level are sent as raw ADC counts. Percentages are computed on the
+ * Linux side (the soil percentage only once its calibration values are set).
  */
 
 #include <Arduino_RouterBridge.h>
@@ -28,7 +28,7 @@
 #define DHTPIN     2
 #define DHTTYPE    DHT11
 #define SOIL_PIN   A0
-#define MQ135_PIN  A1
+#define WATER_PIN  A1          // water level sensor (the MQ-135 was removed)
 
 // ---------- ADC ----------
 #define ADC_BITS        14
@@ -42,7 +42,6 @@
 
 // ---------- timing ----------
 #define SAMPLE_MS        5000UL     // one reading every 5 s
-#define MQ135_WARMUP_MS  180000UL   // first 3 min after power-up: heater still warming
 
 // ---------- DHT11 plausible range (datasheet: 0-50 degC, 20-90 %RH) ----------
 #define T_MIN  -10.0f
@@ -55,10 +54,8 @@ enum : uint32_t {
   F_SOIL_HIGH     = 1u << 2,   // soil ADC pegged near 16383
   F_SOIL_LOW      = 1u << 3,   // soil ADC near 0
   F_SOIL_NOISY    = 1u << 4,   // samples spread too widely to trust
-  F_MQ_HIGH       = 1u << 5,   // MQ-135 ADC pegged: divider missing or wrong?
-  F_MQ_LOW        = 1u << 6,   // MQ-135 ADC near 0: not connected / no heater supply
-  F_MQ_WARMUP     = 1u << 7,   // heater warm-up period after power-up
-  F_MQ_NOISY      = 1u << 8,
+  // bits 5-7 were the MQ-135's
+  F_WATER_NOISY   = 1u << 8,   // water level samples spread too widely to trust
 };
 #define NOISE_SPREAD  2000          // max-min of the middle samples above this = noisy
 
@@ -109,20 +106,19 @@ static void sample() {
   if (soilRaw <= RAIL_LOW)  { faults |= F_SOIL_LOW;  soilValid = false; }
   if (soilSpread > NOISE_SPREAD) { faults |= F_SOIL_NOISY; soilValid = false; }
 
-  // --- MQ-135 ---
-  int mqSpread = 0;
-  const int mqRaw = readMedian(MQ135_PIN, &mqSpread);
-  bool mqValid = true;
-  if (mqRaw >= RAIL_HIGH) { faults |= F_MQ_HIGH; mqValid = false; }
-  if (mqRaw <= RAIL_LOW)  { faults |= F_MQ_LOW;  mqValid = false; }
-  if (mqSpread > NOISE_SPREAD) { faults |= F_MQ_NOISY; mqValid = false; }
-  if (millis() < MQ135_WARMUP_MS) { faults |= F_MQ_WARMUP; mqValid = false; }
+  // --- water level: 0 when dry, rising as more of the strip is under water.
+  // Both ends of the range are real readings here (dry / fully submerged), so
+  // only noise makes it invalid.
+  int waterSpread = 0;
+  const int waterRaw = readMedian(WATER_PIN, &waterSpread);
+  bool waterValid = true;
+  if (waterSpread > NOISE_SPREAD) { faults |= F_WATER_NOISY; waterValid = false; }
 
   seq++;
   // To the Linux side. Floats are sent even when invalid (0), with dhtOk saying
   // whether to use them: NaN does not survive the trip into JSON.
   Bridge.notify("krishi_reading", dhtOk, dhtOk ? t : 0.0f, dhtOk ? h : 0.0f,
-                soilRaw, soilValid, mqRaw, mqValid, (int)faults, (int)seq, (int)(millis() / 1000));
+                soilRaw, soilValid, waterRaw, waterValid, (int)faults, (int)seq, (int)(millis() / 1000));
 
   // --- debug output, as in the original sketch ---
   Monitor.println("\n--- SMART KRISHI SENSOR DATA #" + String(seq) + " ---");
@@ -134,8 +130,8 @@ static void sample() {
   }
   Monitor.println("Soil Moisture Raw: " + String(soilRaw) + " (spread " + String(soilSpread) + ")" +
                   (soilValid ? "" : "  INVALID"));
-  Monitor.println("MQ135 Raw: " + String(mqRaw) + " (spread " + String(mqSpread) + ")" +
-                  (mqValid ? "" : ((faults & F_MQ_WARMUP) ? "  warming up" : "  INVALID")));
+  Monitor.println("Water Level Raw: " + String(waterRaw) + " (spread " + String(waterSpread) + ")" +
+                  (waterValid ? "" : "  INVALID"));
   Monitor.println("faults: 0x" + String(faults, HEX));
 }
 
@@ -145,7 +141,7 @@ void setup() {
   analogReadResolution(ADC_BITS);
   dht.begin();
   Monitor.println("SMART KRISHI SENSOR COLLECTOR");
-  Monitor.println("DHT11 D2, soil A0, MQ-135 A1, 14-bit ADC, every 5 s");
+  Monitor.println("DHT11 D2, soil A0, water level A1, 14-bit ADC, every 5 s");
   lastSampleMs = millis() - SAMPLE_MS + 2500;   // first reading after 2.5 s (DHT settle)
 }
 

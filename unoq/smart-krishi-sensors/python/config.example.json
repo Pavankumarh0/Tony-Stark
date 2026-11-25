@@ -7,5 +7,8 @@
   "_soil_calibration": "Raw ADC with the probe in dry soil and in wet soil (see README). null = not calibrated: no percentage is sent.",
   "soil_dry_raw": null,
   "soil_wet_raw": null,
-  "timeout_s": 4
+  "timeout_s": 4,
+  "_water_level": "Raw ADC with the water level sensor dry (empty) and fully under water (full). Defaults 0 and 16383.",
+  "water_empty_raw": 0,
+  "water_full_raw": 16383
 }

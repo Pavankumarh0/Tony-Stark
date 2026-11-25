@@ -1125,32 +1125,37 @@ static void drawBtn(const Btn &b, const char *label, uint16_t fill, uint16_t fg,
 
 static struct {
   bool have;                 // any D: line received since boot
-  bool srvOk, sv, mv, td;
+  bool srvOk, sv, mv, wv, td;
   long age;                  // seconds since the server got the reading, when sent (-1 none)
   uint32_t rxMs;             // when the D: line arrived
-  char st[10], t[10], h[10], sr[10], sp[10], mq[10], dev[26];
+  char st[10], t[10], h[10], sr[10], sp[10], mq[10], wl[10], dev[26];
   char wt[8], wc[14], wm[64];      // weather: temperature, condition, rain message
   int  wa;                         // rain alert: 0 none, 1 possible, 2 likely, 3 raining
 } dd;
 static int rainAlertShown = 0;
 
 struct DField { char txt[80]; uint16_t fg; bool drawn; };
-enum { F_V0, F_V1, F_V2, F_S0, F_S1, F_S2, F_SENSOR, F_LINK, F_AGE, F_WEATHER, F_COUNT };
+enum { F_V0, F_V1, F_V2, F_V3, F_S0, F_S1, F_S2, F_S3, F_SENSOR, F_LINK, F_AGE, F_WEATHER, F_COUNT };
 static DField dfields[F_COUNT];
 static uint16_t dotColour = 0;
 static uint32_t lastDashTickMs = 0;
 
 // Temperature and humidity side by side; soil moisture full width below,
 // with a bar. (The MQ-135 air-quality card was removed from the dashboard.)
-static const int CARDS = 3;
+static const int CARDS = 4;                   // 2 x 2: temperature, humidity / soil moisture, water level
 static const int16_t CARD_H = 58;
-static const int16_t CARD_X[CARDS] = {8, 164, 8};
-static const int16_t CARD_Y[CARDS] = {34, 34, 96};
+static const int16_t CARD_X[CARDS] = {8, 164, 8, 164};
+static const int16_t CARD_Y[CARDS] = {34, 34, 96, 96};
 static const int16_t WX_Y = 158, WX_H = 34;           // weather strip under the cards
-static const int16_t CARD_WS[CARDS] = {148, 148, 304};
-static const char *const CARD_LABEL[CARDS] = {"Temperature", "Humidity", "Soil moisture"};
-static int barShown = -2;                     // moisture bar cache (-1 = empty bar)
-static uint16_t barColour = 0;
+static const int16_t CARD_WS[CARDS] = {148, 148, 148, 148};
+static const char *const CARD_LABEL[CARDS] = {"Temperature", "Humidity", "Soil moisture", "Water level"};
+static const int16_t GAUGE_W = 10;            // vertical gauge at the right edge of the soil and water cards
+static int barShown[CARDS] = {-2, -2, -2, -2};  // gauge cache per card (-1 = empty gauge)
+static uint16_t barColour[CARDS] = {0};
+static const uint16_t D_WATER = 0x3D7F;       // blue
+
+/* Text width inside a card: the soil and water cards leave room for their gauge. */
+static int16_t cardTextW(int i) { return CARD_WS[i] - 20 - (i >= 2 ? GAUGE_W + 8 : 0); }
 
 static void dashCopy(char *dst, size_t n, const char *src) {
   size_t i = 0;
@@ -1177,6 +1182,8 @@ static void parseDash(char *body) {
     else if (!strcmp(k, "sr")) dashCopy(dd.sr, sizeof dd.sr, v);
     else if (!strcmp(k, "sp")) dashCopy(dd.sp, sizeof dd.sp, v);
     else if (!strcmp(k, "mq")) dashCopy(dd.mq, sizeof dd.mq, v);
+    else if (!strcmp(k, "wl")) dashCopy(dd.wl, sizeof dd.wl, v);
+    else if (!strcmp(k, "wv")) dd.wv = v[0] == '1';
     else if (!strcmp(k, "dev")) dashCopy(dd.dev, sizeof dd.dev, v);
     else if (!strcmp(k, "sv")) dd.sv = v[0] == '1';
     else if (!strcmp(k, "mv")) dd.mv = v[0] == '1';
@@ -1215,7 +1222,7 @@ static void dashValue(int i, const char *value, const char *unit, uint16_t fg) {
   dashCopy(f.txt, sizeof f.txt, key);
   f.fg = fg;
   f.drawn = true;
-  const int16_t x = CARD_X[i] + 10, y = CARD_Y[i] + 20, w = i == 2 ? 140 : CARD_WS[i] - 20;
+  const int16_t x = CARD_X[i] + 10, y = CARD_Y[i] + 20, w = cardTextW(i);
   tft.fillRect(x, y, w, 26, D_CARD);
   const uint8_t font = tft.textWidth(value, 4) + 30 <= w ? 4 : 2;     // "Not calibrated" uses font 2
   tft.setTextDatum(TL_DATUM);
@@ -1232,21 +1239,19 @@ static void dashValue(int i, const char *value, const char *unit, uint16_t fg) {
   }
 }
 
-/* Soil moisture bar in the right half of the soil card: pct 0-100, or -1 = none. */
-static void dashBar(int pct, uint16_t colour) {
-  if (pct == barShown && colour == barColour) return;
-  barShown = pct;
-  barColour = colour;
-  const int16_t bx = CARD_X[2] + 160, by = CARD_Y[2] + 22, bw = 130, bh = 16;
-  tft.fillRoundRect(bx, by, bw, bh, 4, D_BAR);
-  tft.drawRoundRect(bx, by, bw, bh, 4, D_MUTE);
-  if (pct > 0) tft.fillRoundRect(bx + 2, by + 2, (int16_t)((bw - 4) * pct / 100), bh - 4, 3, colour);
-  tft.setTextDatum(TL_DATUM);
-  tft.setTextColor(D_MUTE, D_CARD);
-  tft.fillRect(bx, by + bh + 2, bw, 10, D_CARD);
-  uiDraw("dry", bx, by + bh + 3, 1, 60);
-  tft.setTextDatum(TR_DATUM);
-  uiDraw("wet", bx + bw, by + bh + 3, 1, 60);
+/* Vertical gauge at the right edge of card i (soil moisture, water level), filled
+   from the bottom like a tank: pct 0-100, or -1 = empty. */
+static void dashBar(int i, int pct, uint16_t colour) {
+  if (pct == barShown[i] && colour == barColour[i]) return;
+  barShown[i] = pct;
+  barColour[i] = colour;
+  const int16_t bx = CARD_X[i] + CARD_WS[i] - GAUGE_W - 8, by = CARD_Y[i] + 8, bh = CARD_H - 16;
+  tft.fillRoundRect(bx, by, GAUGE_W, bh, 3, D_BAR);
+  tft.drawRoundRect(bx, by, GAUGE_W, bh, 3, D_MUTE);
+  if (pct > 0) {
+    const int16_t fh = (int16_t)((bh - 4) * pct / 100);
+    tft.fillRoundRect(bx + 2, by + bh - 2 - fh, GAUGE_W - 4, fh, 2, colour);
+  }
 }
 
 /* Weather strip: icon, temperature and the rain message; amber / red on a rain alert. */
@@ -1303,7 +1308,7 @@ static void dashWeather() {
 }
 
 static void dashSub(int i, const char *txt, uint16_t fg) {
-  dashField(F_S0 + i, CARD_X[i] + 10, CARD_Y[i] + 46, i == 2 ? 140 : CARD_WS[i] - 20, 11, CARD_X[i] + 10, CARD_Y[i] + 47,
+  dashField(F_S0 + i, CARD_X[i] + 10, CARD_Y[i] + 46, cardTextW(i), 11, CARD_X[i] + 10, CARD_Y[i] + 47,
             TL_DATUM, 1, txt, fg, D_CARD);
 }
 
@@ -1327,19 +1332,31 @@ static void dashUpdate() {
   if (dd.sv && dd.sp[0]) {
     const int pct = constrain(atoi(dd.sp), 0, 100);
     dashValue(2, dd.sp, "%", vfg);
-    snprintf(buf, sizeof buf, "raw %s%s%s", dd.sr, atol(dd.sr) >= 16319 ? " - probe in air / dry?" : "",
-             old[0] ? ", last known" : "");
-    dashSub(2, buf, old[0] ? D_WARN : D_MUTE);
-    dashBar(pct, !live ? D_DIM : pct < 30 ? D_WARN : D_LEAF);
+    snprintf(buf, sizeof buf, "%s", old[0] ? "last known"
+             : atol(dd.sr) >= 16319 ? "check probe" : pct < 30 ? "dry - irrigate" : pct > 80 ? "very wet" : "good");
+    dashSub(2, buf, old[0] || pct < 30 ? D_WARN : D_MUTE);
+    dashBar(2, pct, !live ? D_DIM : pct < 30 ? D_WARN : D_LEAF);
   } else if (dd.sr[0]) {
     dashValue(2, "Not calibrated", "", D_WARN);
-    snprintf(buf, sizeof buf, "raw %s%s", dd.sr, atol(dd.sr) >= 16319 ? " - check probe" : "");
+    snprintf(buf, sizeof buf, "raw %s%s", dd.sr, atol(dd.sr) >= 16319 ? " check" : "");
     dashSub(2, buf, D_MUTE);
-    dashBar(-1, D_DIM);
+    dashBar(2, -1, D_DIM);
   } else {
     dashValue(2, "--", "", D_DIM);
     dashSub(2, dd.have ? "no valid reading" : "waiting for data", D_MUTE);
-    dashBar(-1, D_DIM);
+    dashBar(2, -1, D_DIM);
+  }
+  // Water level % of the sensor strip that is under water (UNO Q, A1).
+  if (dd.wv && dd.wl[0]) {
+    const int pct = constrain(atoi(dd.wl), 0, 100);
+    dashValue(3, dd.wl, "%", vfg);
+    dashSub(3, old[0] ? "last known" : pct < 5 ? "no water" : pct < 35 ? "low" : pct < 70 ? "medium" : "high",
+            old[0] ? D_WARN : D_MUTE);
+    dashBar(3, pct, !live ? D_DIM : D_WATER);
+  } else {
+    dashValue(3, "--", "", D_DIM);
+    dashSub(3, dd.have ? "no valid reading" : "waiting for data", D_MUTE);
+    dashBar(3, -1, D_DIM);
   }
 
   dashWeather();
@@ -1400,7 +1417,7 @@ static void dashDrawFrame() {
     uiDraw("Press screen firmly to set up touch", 312, 226, 1, 200);
   }
   for (int i = 0; i < F_COUNT; i++) dfields[i].drawn = false;
-  barShown = -2;
+  for (int i = 0; i < CARDS; i++) barShown[i] = -2;
   dotColour = 0;
   dashUpdate();
 }
