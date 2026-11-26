@@ -16,6 +16,9 @@ app.py hands the pipeline in with setup():
     ask(text, session, heard_lang)  -> the localized reply dict (as /chat)
     transcribe(audio, filename)     -> (text, language code)
     speak(text, lang)               -> MP3 bytes
+    photo(image, mime, caption, session) -> [report texts] (English, Kannada, Hindi)
+
+A crop photo gets a diagnosis report in all three languages (vision.py).
 """
 import asyncio, hashlib, hmac, json, logging, os, re
 from collections import OrderedDict
@@ -27,20 +30,34 @@ log = logging.getLogger("krishi.bots")
 router = APIRouter()
 
 WELCOME = ("Namaskara! I am Smart Krishi, your farming assistant. Ask me about crops, soil, fertilizer, "
-           "pests, weather or mandi prices. Type your question or send a voice note in Kannada, Hindi or English.")
+           "pests, weather or mandi prices. Type your question or send a voice note in Kannada, Hindi or English. "
+           "Send a photo of a sick crop to get a report on what is wrong and how to fix it.")
+CHECKING = "📷 Checking your crop photo... the report will come in English, Kannada and Hindi."
+MAX_IMAGE = 5 * 1024 * 1024
 UNHEARD = "Sorry, I couldn't hear that clearly. Please send the voice note again, or type your question."
 FAILED = "Sorry, something went wrong while answering. Please try again in a little while."
 MAX_TEXT = 4000                   # both apps cap one message at 4096 characters
 MAX_AUDIO = 16 * 1024 * 1024      # longer voice notes are refused, not transcribed
 
-_ask = _transcribe = _speak = None
+_ask = _transcribe = _speak = _photo = None
 _tasks: set = set()               # running Telegram handlers (kept so they are not garbage collected)
 _seen: "OrderedDict[str, None]" = OrderedDict()   # WhatsApp message ids already handled (Meta redelivers)
 
 
-def setup(ask, transcribe, speak):
-    global _ask, _transcribe, _speak
-    _ask, _transcribe, _speak = ask, transcribe, speak
+def setup(ask, transcribe, speak, photo=None):
+    global _ask, _transcribe, _speak, _photo
+    _ask, _transcribe, _speak, _photo = ask, transcribe, speak, photo
+
+
+async def photo_replies(session: str, image: bytes, mime: str, caption: str = "") -> list[str]:
+    """The photo report messages, one per language."""
+    if _photo is None:
+        return ["Photo checking is not set up on this server."]
+    try:
+        return [t[:MAX_TEXT] for t in await _photo(image, mime, caption, session)]
+    except Exception:
+        log.exception("photo report failed")
+        return [FAILED]
 
 
 def _env(name: str) -> str:
@@ -150,9 +167,24 @@ async def _telegram_message(c: httpx.AsyncClient, base: str, m: dict):
         return
     text = (m.get("text") or "").strip()
     voice = m.get("voice") or m.get("audio")
+    doc = m.get("document") or {}
+    picture = (m["photo"][-1] if m.get("photo") else                     # the largest size is last
+               doc if str(doc.get("mime_type", "")).startswith("image/") else None)
     send = lambda t: c.post(f"{base}/sendMessage", json={"chat_id": chat, "text": t,
                                                           "reply_parameters": {"message_id": m["message_id"]}})
     try:
+        if picture:
+            if picture.get("file_size", 0) > MAX_IMAGE:
+                await send("That photo is too large. Please send a smaller photo (under 5 MB).")
+                return
+            await send(CHECKING)
+            await c.post(f"{base}/sendChatAction", json={"chat_id": chat, "action": "typing"})
+            f = (await c.get(f"{base}/getFile", params={"file_id": picture["file_id"]})).json()["result"]
+            image = (await c.get(f"{base.replace('/bot', '/file/bot', 1)}/{f['file_path']}")).content
+            for reply in await photo_replies(f"tg:{chat}", image, doc.get("mime_type") or "image/jpeg",
+                                             (m.get("caption") or "").strip()):
+                await c.post(f"{base}/sendMessage", json={"chat_id": chat, "text": reply})
+            return
         if text.startswith(("/start", "/help")) or (not text and not voice):
             await send(WELCOME)
             return
@@ -238,6 +270,22 @@ async def _whatsapp_message(m: dict):
             text, audio, name = "", None, "voice.ogg"
             if kind == "text":
                 text = (m.get("text", {}).get("body") or "").strip()
+            elif kind == "image" or (kind == "document" and
+                                     str(m.get("document", {}).get("mime_type", "")).startswith("image/")):
+                item = m[kind]
+                await _whatsapp_send(c, who, {"type": "text", "text": {"body": CHECKING},
+                                              "context": {"message_id": m["id"]}})
+                media = (await c.get(f"{_graph()}/{item['id']}")).json()
+                if media.get("file_size", 0) > MAX_IMAGE:
+                    await _whatsapp_send(c, who, {"type": "text", "text": {"body": "That photo is too large. "
+                                                                           "Please send a smaller photo."}})
+                    return
+                image = (await c.get(media["url"])).content
+                for reply in await photo_replies(f"wa:{who}", image, media.get("mime_type") or
+                                                 item.get("mime_type") or "image/jpeg",
+                                                 (item.get("caption") or "").strip()):
+                    await _whatsapp_send(c, who, {"type": "text", "text": {"body": reply}})
+                return
             elif kind == "audio":
                 media = (await c.get(f"{_graph()}/{m['audio']['id']}")).json()
                 if media.get("file_size", 0) > MAX_AUDIO:

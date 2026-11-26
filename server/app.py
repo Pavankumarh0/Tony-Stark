@@ -36,7 +36,7 @@ from typing import Annotated
 from pydantic import BaseModel, Field, model_validator
 
 import hmac
-import alerts, bots, fertilizer, language, llm, prices, sensors, speech, ui_i18n, weather
+import alerts, bots, fertilizer, language, llm, prices, sensors, speech, ui_i18n, vision, weather
 from grounding import grounded_part, grounded_sources
 from prompts import GENERAL_PROMPT, PROMPT
 from rag import Retriever
@@ -510,7 +510,22 @@ async def ask_farmer(text: str, session: str, heard_lang: str | None = None) -> 
     return await localize(await answer_question(q["english"], session), q["language"], q["style"])
 
 
-bots.setup(ask=ask_farmer,
+async def photo_farmer(image: bytes, mime: str, caption: str, session: str) -> list[str]:
+    """A crop photo -> the diagnosis report in English, Kannada and Hindi (the bots' photo pipeline).
+    The report is remembered in the chat, so "which spray should I use?" follows on from it."""
+    rec = sensors.latest()
+    live = sensors.as_context(rec) if rec and sensors.status(rec) == "online" else ""
+    if caption:
+        caption = (await language.understand(caption, None))["english"]
+    texts, summary = await vision.photo_reports(image, mime, caption, live)
+    if summary:
+        q = f"[crop photo] {caption}".strip()
+        HISTORY.setdefault(session, deque(maxlen=HISTORY_TURNS)).append((q, summary))
+        LAST_Q[session] = summary[:200]
+    return [texts[lang] for lang in vision.LANGS if lang in texts]
+
+
+bots.setup(ask=ask_farmer, photo=photo_farmer,
            transcribe=lambda audio, name: asyncio.to_thread(speech.transcribe_file_detect, audio,
                                                             META["stt_hint"], name),
            speak=lambda text, lang: speech.synth_mp3(for_speech(text), language.voice(lang)))
